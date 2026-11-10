@@ -1,0 +1,26 @@
+# 依你这个项目实际情况补充
+.venv/
+venv/
+__pycache__/
+*.py[cod]
+*.pyo
+
+# 打包产物 / 二进制不入库
+*.exe
+*.dll
+*.pyd
+build/
+dist/
+
+# 运行时数据与个人信息
+config.json
+*.log
+decrypted_cache/
+sound_cache/
+wx_key*.txt
+
+# 编辑器
+.vscode/
+.idea/
+.DS_Store
+Thumbs.db

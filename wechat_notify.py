@@ -67,7 +67,7 @@ except Exception:
     _HAS_WECOM = False
 
 APP_NAME = "微信提醒"
-VERSION = "4.6.2"
+VERSION = "4.6.3"
 # 对外唯一联系入口（关于我们页展示，点击可复制）
 CONTACT_EMAIL = "smallfishanddream@outlook.com"
 APP_DIR = os.path.join(os.environ.get("APPDATA", os.path.expanduser("~")), "微信提醒")
@@ -3263,8 +3263,41 @@ class Banner:
     def _release(self, e):
         if self._press_pos and not self._moved:
             self._open_wechat()
+        elif self._moved:
+            self._lock_pos()
         self._press_pos = None
         self._drag_data = None
+        # 同一个松开事件会被"子控件"和"窗口"两条绑定各收一次，清掉 _moved，
+        # 免得重复保存/重复打日志
+        self._moved = False
+
+    def _lock_pos(self):
+        """v4.6.3: 拖到哪就固定在哪——松手时把横幅当前的左上角写成自定义坐标。
+
+        不用再进设置页填数字：拖完就存进 config，下一屏横幅还落在同一处；
+        设置窗口开着的话，那边「启用」会自动勾上、X / Y 跟着回填。
+        """
+        try:
+            x, y = int(self.win.winfo_x()), int(self.win.winfo_y())
+        except Exception as e:
+            log(f"[横幅] 取拖动后的位置失败: {e}")
+            return
+        if x < 0 or y < 0:
+            # Tk 的 geometry 只认"从主屏左上角算起"的正坐标；拖到主屏左/上方的
+            # 副屏时 winfo_x/y 是负数，存下去下次摆不回来，这里只提示不落盘。
+            log(f"[横幅] 拖到了负坐标 ({x}, {y})，这版只支持主屏左上角起算的坐标，未保存")
+            return
+        config["banner_pos"] = "custom"
+        config["banner_pos_x"] = x
+        config["banner_pos_y"] = y
+        save_config()
+        log(f"[横幅] 位置已固定为 ({x}, {y})")
+        try:
+            w = getattr(self, "settings", None)
+            if w is not None:
+                w.sync_banner_pos(x, y)
+        except Exception as e:
+            log(f"[横幅] 同步设置页坐标失败: {e}")
 
     def _open_wechat(self):
         msg = getattr(self, "_current_msg", None) or {}
@@ -4451,7 +4484,9 @@ class SettingsWindow:
         self._hint(card, "先勾「启用」再填坐标：X / Y = 横幅左上角的屏幕像素坐标"
                          "（副屏可直接填副屏坐标，如副屏从 2560 起就填 2600）。"
                          "勾上后上面水平/垂直的选中会一并取消；点其中任一预设则自动"
-                         "取消勾选、回到预设位置")
+                         "取消勾选、回到预设位置。"
+                         "也可以不填：等横幅弹出来后直接用鼠标把它拖到想要的位置，"
+                         "松手就固定在那儿，这里的勾选和 X / Y 会自动跟着变")
 
         # 配色
         card = self._section(col_r, "配色")
@@ -5221,6 +5256,23 @@ class SettingsWindow:
                 w._sync()
             except Exception:
                 pass
+
+    def sync_banner_pos(self, x, y):
+        """v4.6.3: 横幅被鼠标拖走后，把新位置回填到本页——勾上「启用」、X / Y 改成
+        刚拖到的地方、水平/垂直预设取消选中。程序改 var 不会触发控件自身刷新，
+        所以单选圈要手动重画。"""
+        try:
+            if getattr(self, "var_bcustom", None) is None:
+                return
+            self.var_bcustom.set(True)
+            self._sync_custom_chk()
+            self.var_px.set(str(int(x)))
+            self.var_py.set(str(int(y)))
+            self.var_pos.set("")
+            self.var_bvertical.set("")
+            self._refresh_pos_radios()
+        except Exception as e:
+            log(f"[设置] 同步横幅坐标失败: {e}")
 
     def _sync_custom_chk(self):
         try:
@@ -6430,12 +6482,14 @@ def main():
             if w is None:
                 w = SettingsWindow(root, banner, quit_app)
                 win_holder["win"] = w
+            banner.settings = w  # v4.6.3: 横幅拖走后回填坐标用
             w.show()
         except Exception as e:
             log(f"[设置] open_settings 异常，重建窗口: {e}")
             try:
                 w = SettingsWindow(root, banner, quit_app)
                 win_holder["win"] = w
+                banner.settings = w
                 w.show()
             except Exception as e2:
                 log(f"[设置] open_settings 重建失败: {e2}")

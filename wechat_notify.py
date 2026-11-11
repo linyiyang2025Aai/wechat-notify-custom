@@ -67,7 +67,7 @@ except Exception:
     _HAS_WECOM = False
 
 APP_NAME = "微信提醒"
-VERSION = "4.6.1"
+VERSION = "4.6.2"
 # 对外唯一联系入口（关于我们页展示，点击可复制）
 CONTACT_EMAIL = "smallfishanddream@outlook.com"
 APP_DIR = os.path.join(os.environ.get("APPDATA", os.path.expanduser("~")), "微信提醒")
@@ -782,7 +782,7 @@ _wx_last_drive = None
 _wx_rate_hits = {"off": 0, "gap": 0, "min": 0, "hour": 0}
 _wx_rate_done = 0
 _wx_outcomes = {}          # {"跳会话": {"ok": 2, "no-front": 1, ...}, ...} 每次过闸后的结局
-_WX_OK_STEPS = frozenset({"typed", "entered", "filled", "drive-ok"})
+_WX_OK_STEPS = frozenset({"typed", "entered", "opened", "filled", "drive-ok"})
 
 
 def wx_drive_note(where, step):
@@ -1042,7 +1042,7 @@ def wx_quiet_gate(r, where):
     return quiet
 
 
-def wx_open_chat(name, press_enter=False, verify_username=None):
+def wx_open_chat(name, press_enter=False, verify_username=None, click_row=False):
     """尝试把微信切到 name 这个联系人的会话。返回逐步判定结果，任何一步失败都立刻收手。
 
     闸门顺序：总闸 -> 安静闸 -> 驱动权 -> 频率闸 -> 确认前台 -> 点搜索框 ->
@@ -1073,7 +1073,7 @@ def wx_open_chat(name, press_enter=False, verify_username=None):
         if not wx_rate_gate(r, "跳会话"):
             return r
         r["_driven"] = True
-        return _wx_open_chat(name, press_enter, verify_username, r)
+        return _wx_open_chat(name, press_enter, verify_username, r, click_row)
     except WxFocusLost as e:
         r["ok"] = False
         r["step"] = "wx-gone" if not wx_guard_alive() else "lost-front"
@@ -1088,7 +1088,7 @@ def wx_open_chat(name, press_enter=False, verify_username=None):
         wx_drive_release()
 
 
-def _wx_open_chat(name, press_enter, verify_username, r):
+def _wx_open_chat(name, press_enter, verify_username, r, click_row=False):
     ok, why = wx_activate_verified()
     if not ok:
         r["step"], r["why"] = "no-front", why
@@ -1099,11 +1099,12 @@ def _wx_open_chat(name, press_enter, verify_username, r):
         return r
     pids = wx_pids()
     wx_guard_arm(main, pids)      # 从这里开始，每一手输入前都要重新确认前台
-    return _wx_open_steps(name, press_enter, verify_username, r, main, crect, pids)
+    return _wx_open_steps(name, press_enter, verify_username, r, main, crect, pids,
+                          click_row=click_row)
 
 
 def _wx_open_steps(name, press_enter, verify_username, r, main, crect, pids,
-                   weak_check=False):
+                   weak_check=False, click_row=False):
     """跳会话这一段的全部证据步骤。前提：已经抢到前台并且布好防。
     之所以单独拆出来，是让"点一次话术"能在**同一条链子**里接着打字（见 wx_jump_fill），
     而不是松掉驱动锁、还掉配额、再重新抢一次前台。
@@ -1173,7 +1174,7 @@ def _wx_open_steps(name, press_enter, verify_username, r, main, crect, pids,
         log("[跳会话] 面板在但没吃到输入，已退格撤销并关闭（没回车）")
         return r
     r["step"] = "typed"
-    if not press_enter:
+    if not press_enter and not click_row:
         log(f"[跳会话] 已把「{name}」填进微信搜索框，等你自己回车/点结果")
         r["ok"] = True
         return r
@@ -1181,16 +1182,24 @@ def _wx_open_steps(name, press_enter, verify_username, r, main, crect, pids,
     # 是不是它"的唯一硬证据。放在回车前取，是为了不把他中途用手机读掉的情况
     # 误判成成功（那样未读本来就是 0，核对不出任何东西）。
     before = wx_read_unread(verify_username) if verify_username else None
-    wx_key(VK_ENTER)
-    r["step"] = "entered"
+    if click_row:
+        # 点横幅这条路走"点结果行"，不走回车：微信 4.x 的全局搜索里回车落在第一行
+        # 「搜索网络结果」上，打开的是搜一搜（2026-10-23 真机记录过它把微信搞到卡退），
+        # 根本进不了会话（2026-11-11 真机复现：回车两次都没换会话）。
+        if not _wx_click_result_row(panel, pids, r):
+            return r
+    else:
+        wx_key(VK_ENTER)
+        r["step"] = "entered"
     r["ok"] = True
     if verify_username:
+        how = "已点开" if click_row else "已回车"
         if before is None:
             r["verified"] = "no-db"
-            log("[跳会话] 已回车，但库打不开，没法核对打开的是不是目标会话")
+            log(f"[跳会话] {how}，但库打不开，没法核对打开的是不是目标会话")
         elif before == 0:
             r["verified"] = "no-signal"
-            log(f"[跳会话] 已回车（「{verify_username}」本来就没有未读，无法用清零核对）")
+            log(f"[跳会话] {how}（「{verify_username}」本来就没有未读，无法用清零核对）")
         else:
             cleared = wx_wait_unread_cleared(verify_username)
             r["verified"] = cleared
@@ -1241,6 +1250,101 @@ def _wx_open_steps(name, press_enter, verify_username, r, main, crect, pids,
                         f"差异区 {box}，面板 {int(rw)}x{int(rh)}），"
                         f"按目标会话已打开处理")
     return r
+
+
+def _panel_avatar_row(img):
+    """在搜索面板截图里找第一块"头像"所在的行，返回 (y0, y1)；找不到返回 None。
+
+    判据：左侧图标列里 22x22 的小方块，亮度标准差很大（照片/图案头像）或饱和色占比很高
+    （纯色头像）才算头像。灰色细线放大镜、"搜索网络结果"的浅色小图标、被高亮成绿色的
+    搜索建议文字都达不到阈值（2026-11-11 实测：头像 std≥80，图标、文字 std≤50）。
+    第一块命中的就是列表里第一个能点开会话的行，而且它排在聊天记录前面。
+    """
+    im = img.convert("RGB")
+    pw, ph = im.size
+    if pw < 30 or ph < 30:
+        return None
+    px = im.load()
+    segs, cur = [], None
+    for y in range(4, ph - 22, 2):
+        hit = False
+        for x0 in range(8, max(10, min(86, pw - 22)), 6):
+            x1 = min(x0 + 22, pw)
+            vals, sat = [], 0
+            for x in range(x0, x1):
+                for yy in range(y, y + 22):
+                    c = px[x, yy]
+                    vals.append((c[0] * 299 + c[1] * 587 + c[2] * 114) / 1000)
+                    mx = max(c[0], c[1], c[2])
+                    mn = min(c[0], c[1], c[2])
+                    if mx > 60 and (mx - mn) / max(mx, 1) > 0.30:
+                        sat += 1
+            n = max(1, len(vals))
+            m = sum(vals) / n
+            sd = (sum((v - m) ** 2 for v in vals) / n) ** 0.5
+            if sd >= 55 or sat / n >= 0.38:
+                hit = True
+                break
+        if hit:
+            cur = [y, y] if cur is None else [cur[0], y]
+        else:
+            if cur:
+                segs.append(tuple(cur))
+                cur = None
+    if cur:
+        segs.append(tuple(cur))
+    segs = [s for s in segs if s[1] - s[0] >= 12]
+    return segs[0] if segs else None
+
+
+def _wx_click_result_row(panel, pids, r):
+    """点搜索面板里第一个会话行，把会话打开。
+
+    成功返回 True（r 里留下点击坐标和"面板已关闭"的证据）；找不到能点的行就 Esc 收手
+    返回 False——绝不乱点，宁可什么都不开也不点开别人。
+    """
+    img = wx_print_window(panel)
+    if img is None:
+        wx_key(VK_ESC)
+        r["step"] = "no-print"
+        log("[跳会话] 抓不到搜索面板画面，已 Esc 收手（没点）")
+        return False
+    seg = _panel_avatar_row(img)
+    if not seg:
+        wx_key(VK_ESC)
+        r["step"] = "no-result"
+        log("[跳会话] 搜索面板里没有能点开的会话行（多半没搜到这个联系人/群），已 Esc 收手")
+        return False
+    prect = wt.RECT()
+    user32.GetWindowRect(int(panel), ctypes.byref(prect))
+    ww, wh = prect.right - prect.left, prect.bottom - prect.top
+    if ww <= 0 or wh <= 0:
+        wx_key(VK_ESC)
+        r["step"] = "no-rect"
+        return False
+    iw, ih = img.size
+    yc = (seg[0] + seg[1]) // 2
+    # 横向落在行内偏左 30% 处（头像后面就是名字，整行都可点）；截图按窗口实际尺寸等比换算
+    sx = prect.left + int(ww * 0.30)
+    sy = prect.top + int(yc * wh / ih)
+    r["click"] = (sx, sy)
+    try:
+        wx_click(sx, sy)          # 内部有前台守卫；点完把光标放回原处
+    except WxFocusLost:
+        raise
+    except Exception as e:
+        wx_key(VK_ESC)
+        r["step"], r["why"] = "click-fail", str(e)
+        return False
+    time.sleep(0.9)
+    gone = True
+    for h, (cls, _rect) in wx_visible_tops(pids).items():
+        if cls.endswith(WX_PANEL_CLASS_TAIL):
+            gone = False
+    r["panel_closed"] = gone
+    r["step"] = "opened"
+    log(f"[跳会话] 已点搜索结果的会话行（{sx},{sy}），搜索面板已关闭={gone}")
+    return True
 
 
 def wx_read_unread(username):
@@ -3172,22 +3276,25 @@ class Banner:
             except Exception as e:
                 log(f"[横幅] 打开企业微信失败: {e}")
             return
+        # 左键单击横幅 = 把微信带到前台。只有开了「自动回复」时才顺便跳到那条消息
+        # 所在的会话（要去填话术，不能不带过去）；不跳就纯粹 bring_wechat_front。
         name = (msg.get("sender") or "").strip()
-        jump = bool(config.get("auto_reply")) and msg and not msg.get("is_group") and name
+        if msg.get("is_group"):
+            name = (msg.get("group_name") or "").strip() or name
         self._dismiss()
-        if not jump:
-            threading.Thread(target=bring_wechat_front, daemon=True).start()
+        if config.get("auto_reply") and name:
+            threading.Thread(target=self._jump_then_report,
+                             args=(name, msg.get("session_key") or ""), daemon=True).start()
             return
-        # 群聊不走这条路：群里"打开某个会话"要搜的是群名，同名群/折叠群一律搜不准
-        threading.Thread(target=self._jump_then_report,
-                         args=(name, msg.get("session_key") or ""), daemon=True).start()
+        threading.Thread(target=bring_wechat_front, daemon=True).start()
 
     def _jump_then_report(self, name, session_key=""):
         """跳会话整条链子要 1~3 秒，必须放在工作线程里跑，不然横幅的淡出/定时器会卡住。
 
         session_key 只用来做事后核对（未读有没有清零），不参与"搜什么"。"""
         try:
-            r = wx_open_chat(name, press_enter=True, verify_username=session_key or None)
+            r = wx_open_chat(name, press_enter=True, verify_username=session_key or None,
+                             click_row=True)
         except Exception as e:
             log(f"[跳会话] 异常：{e}")
             return
@@ -4302,25 +4409,38 @@ class SettingsWindow:
 
         # 显示
         card = self._section(col_l, "显示")
+        # v4.6.3: 自定义坐标改成"显式勾选"——勾上时水平/垂直预设直接取消选中，
+        # 一眼就能看出现在到底按哪个放；取消勾选则回到上次用过的预设。
+        _is_custom = config.get("banner_pos") == "custom"
+        self._preset_pos = "center" if _is_custom else config.get("banner_pos", "center")
+        self._preset_vpos = config.get("banner_vertical", "top") or "top"
         r, _ = self._row(card, "水平位置")
-        self.var_pos = tk.StringVar(value=config.get("banner_pos", "center"))
+        self.var_pos = tk.StringVar(
+            value="" if _is_custom else config.get("banner_pos", "center"))
+        self._radio_h = []
         for val, lab in (("center", "居中"), ("left", "居左"), ("right", "居右")):
-            RoundedRadio(r, lab, val, self.var_pos,
-                         command=self._apply_banner).pack(side="left", padx=(8, 0))
+            w = RoundedRadio(r, lab, val, self.var_pos, command=self._on_hpos)
+            w.pack(side="left", padx=(8, 0))
+            self._radio_h.append(w)
         # v4.1.0: 垂直位置（社区反馈：可设置横幅显示位置顶部/中间/底部）
         r, _ = self._row(card, "垂直位置")
-        # v4.6.2: 自定义坐标模式下不显示垂直预设的选中态（纵坐标此时由 Y 决定）
         self.var_bvertical = tk.StringVar(
-            value="" if config.get("banner_pos") == "custom"
-            else config.get("banner_vertical", "top"))
+            value="" if _is_custom else config.get("banner_vertical", "top"))
+        self._radio_v = []
         for val, lab in (("top", "顶部"), ("center", "中部"), ("bottom", "底部")):
-            RoundedRadio(r, lab, val, self.var_bvertical,
-                         command=self._on_vertical).pack(side="left", padx=(8, 0))
-        # v4.6.2: 自定义位置——直接填横幅左上角的屏幕像素坐标
+            w = RoundedRadio(r, lab, val, self.var_bvertical,
+                             command=self._on_vertical)
+            w.pack(side="left", padx=(8, 0))
+            self._radio_v.append(w)
+        # v4.6.3: 自定义位置——先勾「启用」，再填横幅左上角的屏幕像素坐标
         r, _ = self._row(card, "自定义坐标")
+        self.var_bcustom = tk.BooleanVar(value=_is_custom)
+        self._chk_custom = RoundedCheckbox(r, "启用", self.var_bcustom,
+                                          command=self._on_bcustom)
+        self._chk_custom.pack(side="left", padx=(8, 12))
         self.var_px = tk.StringVar(value=str(int(config.get("banner_pos_x", 40))))
         RoundedSpinbox(r, 0, 9999, textvariable=self.var_px, width=5,
-                       on_change=self._on_pos_xy).pack(side="left", padx=(8, 0))
+                       on_change=self._on_pos_xy).pack(side="left", padx=(0, 0))
         tk.Label(r, text=" X", bg=CARD_BG, fg=self.P["SUB"],
                  font=(FONT, 9)).pack(side="left", padx=(2, 10))
         self.var_py = tk.StringVar(value=str(int(config.get("banner_pos_y", 40))))
@@ -4328,9 +4448,10 @@ class SettingsWindow:
                        on_change=self._on_pos_xy).pack(side="left", padx=(2, 0))
         tk.Label(r, text=" Y", bg=CARD_BG, fg=self.P["SUB"],
                  font=(FONT, 9)).pack(side="left", padx=(2, 0))
-        self._hint(card, "X / Y = 横幅左上角的屏幕像素坐标（副屏可直接填副屏坐标，"
-                         "如副屏从 2560 起就填 2600）；填了坐标即以坐标为准，"
-                         "点上面「居中/居左/居右」可切回预设位置")
+        self._hint(card, "先勾「启用」再填坐标：X / Y = 横幅左上角的屏幕像素坐标"
+                         "（副屏可直接填副屏坐标，如副屏从 2560 起就填 2600）。"
+                         "勾上后上面水平/垂直的选中会一并取消；点其中任一预设则自动"
+                         "取消勾选、回到预设位置")
 
         # 配色
         card = self._section(col_r, "配色")
@@ -5092,22 +5213,76 @@ class SettingsWindow:
         if save:
             self._save()
 
+    def _refresh_pos_radios(self):
+        """v4.6.3: 程序改 var_pos / var_bvertical 时，单选圆圈不会自己重画
+        （RoundedRadio 只在被点击时才刷新组），这里手动刷一遍。"""
+        for w in (getattr(self, "_radio_h", []) + getattr(self, "_radio_v", [])):
+            try:
+                w._sync()
+            except Exception:
+                pass
+
+    def _sync_custom_chk(self):
+        try:
+            self._chk_custom._sync()
+        except Exception:
+            pass
+
+    def _on_bcustom(self):
+        """v4.6.3: 勾上「启用」= 坐标说了算，水平/垂直预设一律取消选中；
+        取消勾选 = 回到上次选过的预设位置。"""
+        if self.var_bcustom.get():
+            self.var_pos.set("")
+            self.var_bvertical.set("")
+        else:
+            self.var_pos.set(self._preset_pos or "center")
+            self.var_bvertical.set(self._preset_vpos or "top")
+        self._refresh_pos_radios()
+        self._apply_banner()
+
+    def _on_hpos(self):
+        """v4.6.3: 点水平预设 → 自动退出自定义坐标，预设位置真正生效。"""
+        val = self.var_pos.get()
+        if val:
+            self._preset_pos = val
+        if self.var_bcustom.get():
+            self.var_bcustom.set(False)
+            self._sync_custom_chk()
+            self.var_bvertical.set(self._preset_vpos or "top")
+            self._refresh_pos_radios()
+        self._apply_banner()
+
     def _on_vertical(self):
-        """v4.6.2: 点顶部/中部/底部时退出自定义坐标模式，让预设位置真正生效。"""
-        if self.var_pos.get() == "custom":
-            self.var_pos.set("center")
+        """v4.6.2/3: 点顶部/中部/底部 → 自动退出自定义坐标，保留已选的水平预设。"""
+        val = self.var_bvertical.get()
+        if val:
+            self._preset_vpos = val
+        if self.var_bcustom.get():
+            self.var_bcustom.set(False)
+            self._sync_custom_chk()
+            self.var_pos.set(self._preset_pos or "center")
+            self._refresh_pos_radios()
         self._apply_banner()
 
     def _on_pos_xy(self):
-        """v4.6.2: 输入自定义坐标后自动切到「自定义」并立即应用。"""
-        try:
-            self.var_pos.set("custom")
-        except Exception:
-            pass
+        """v4.6.3: 改 X / Y 数值即视为要用坐标——自动勾上「启用」并清掉预设选中。"""
+        if not self.var_bcustom.get():
+            self.var_bcustom.set(True)
+            self._sync_custom_chk()
+            self.var_pos.set("")
+            self.var_bvertical.set("")
+            self._refresh_pos_radios()
         self._apply_banner()
 
     def _apply_banner(self):
-        config["banner_pos"] = self.var_pos.get()
+        # v4.6.3: 勾了「启用」就写 custom（此时 var_pos 是空的，不能直接拿来写配置）；
+        # 没勾则取水平预设值，空值兜底到上次的预设
+        if getattr(self, "var_bcustom", None) is not None and self.var_bcustom.get():
+            config["banner_pos"] = "custom"
+        else:
+            config["banner_pos"] = (self.var_pos.get()
+                                    or getattr(self, "_preset_pos", "center")
+                                    or "center")
         config["banner_theme"] = self.var_btheme.get()
         config["banner_title"] = self.var_btitle.get().strip() or "微信 · 新消息"
         try:
@@ -5124,7 +5299,10 @@ class SettingsWindow:
         except Exception:
             pass
         if hasattr(self, "var_bvertical"):
-            config["banner_vertical"] = self.var_bvertical.get()
+            # v4.6.3: custom 模式下竖值是空的，不能拿空串覆盖配置里上次的垂直预设
+            _vpos = self.var_bvertical.get()
+            if _vpos:
+                config["banner_vertical"] = _vpos
         # v4.6.2: 自定义左上角坐标（X / Y）
         for _var, _key in (("var_px", "banner_pos_x"), ("var_py", "banner_pos_y")):
             if hasattr(self, _var):
